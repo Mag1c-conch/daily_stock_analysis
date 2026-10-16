@@ -4042,7 +4042,8 @@ class StockAnalysisPipeline:
                                     filename=f"dashboard_{date_str}.md",
                                 )
                                 return self.notifier.send_feishu_file(filepath)
-                            return self.notifier.send_to_feishu(report)
+                            card_meta = self.notifier._build_feishu_card_meta_from_results(results)
+                            return self.notifier.send_to_feishu(report, card_meta=card_meta)
 
                         channel_success, channel_error = _send_channel_safely(
                             channel.value,

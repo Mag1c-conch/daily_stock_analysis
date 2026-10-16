@@ -2577,7 +2577,12 @@ class NotificationService(
 
     @staticmethod
     def _build_feishu_card_meta(structured_payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Extract Feishu card metadata from structured_payload for rich card rendering."""
+        """Extract Feishu card metadata from structured_payload for rich card rendering.
+
+        Supports two payload shapes:
+          1. Aggregate: {"stocks": [...], "report_date": ...}
+          2. Single result (AnalysisResult.to_dict): {"action": "buy", "sentiment_score": 82, ...}
+        """
         if not structured_payload or not isinstance(structured_payload, dict):
             return None
         meta: Dict[str, Any] = {}
@@ -2598,7 +2603,6 @@ class NotificationService(
                 if not isinstance(stock, dict):
                     continue
                 action = str(stock.get("action", "") or stock.get("signal_action", "") or "").lower()
-                score = stock.get("sentiment_score") or stock.get("score")
                 if action in ("buy", "add", "strong_buy"):
                     buy_count += 1
                 elif action in ("sell", "reduce", "strong_sell"):
@@ -2609,10 +2613,51 @@ class NotificationService(
                 meta["buy_count"] = buy_count
                 meta["sell_count"] = sell_count
                 meta["hold_count"] = hold_count
+        elif "action" in structured_payload or "sentiment_score" in structured_payload:
+            action = str(structured_payload.get("action", "") or "").lower()
+            if action in ("buy", "add", "strong_buy"):
+                meta["buy_count"] = 1
+            elif action in ("sell", "reduce", "strong_sell"):
+                meta["sell_count"] = 1
+            else:
+                meta["hold_count"] = 1
+            stock_name = structured_payload.get("name")
+            stock_code = structured_payload.get("code")
+            if stock_name or stock_code:
+                meta["stock_label"] = f"{stock_name or ''}({stock_code or ''})"
         market_review = structured_payload.get("market_review") or structured_payload.get("market_status")
         if market_review:
             meta["report_type"] = "market_review"
         return meta if meta else None
+
+    @staticmethod
+    def _build_feishu_card_meta_from_results(results: Optional[list]) -> Optional[Dict[str, Any]]:
+        """Build Feishu card meta directly from AnalysisResult objects.
+
+        This is the primary path for aggregate report notifications where we
+        have the actual result objects, not a serialized payload.
+        """
+        if not results:
+            return None
+        from datetime import datetime as _dt
+        meta: Dict[str, Any] = {
+            "report_timestamp": _dt.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        buy_count = 0
+        sell_count = 0
+        hold_count = 0
+        for r in results:
+            action = str(getattr(r, "action", "") or "").lower()
+            if action in ("buy", "add", "strong_buy"):
+                buy_count += 1
+            elif action in ("sell", "reduce", "strong_sell"):
+                sell_count += 1
+            else:
+                hold_count += 1
+        meta["buy_count"] = buy_count
+        meta["sell_count"] = sell_count
+        meta["hold_count"] = hold_count
+        return meta
 
     def _send_to_static_channel(
         self,
