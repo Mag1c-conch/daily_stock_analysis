@@ -2661,8 +2661,9 @@ class NotificationService(
         """
         if not results:
             return None
+        from datetime import datetime as _dt
         meta: Dict[str, Any] = {
-            "report_timestamp": NotificationManager._get_report_timestamp(),
+            "report_timestamp": _dt.now().strftime("%Y-%m-%d %H:%M"),
         }
         buy_count = 0
         sell_count = 0
