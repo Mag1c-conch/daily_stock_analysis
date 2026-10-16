@@ -2575,6 +2575,45 @@ class NotificationService(
     def _sanitize_notification_diagnostics(text: Any) -> str:
         return sanitize_diagnostic_text(text)
 
+    @staticmethod
+    def _build_feishu_card_meta(structured_payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Extract Feishu card metadata from structured_payload for rich card rendering."""
+        if not structured_payload or not isinstance(structured_payload, dict):
+            return None
+        meta: Dict[str, Any] = {}
+        report_date = structured_payload.get("report_date") or structured_payload.get("date")
+        if report_date:
+            meta["report_date"] = str(report_date)
+        report_type = structured_payload.get("report_type")
+        if report_type:
+            meta["report_type"] = str(report_type)
+        from datetime import datetime as _dt
+        meta["report_timestamp"] = _dt.now().strftime("%Y-%m-%d %H:%M")
+        stocks = structured_payload.get("stocks") or structured_payload.get("results") or []
+        if isinstance(stocks, list) and stocks:
+            buy_count = 0
+            sell_count = 0
+            hold_count = 0
+            for stock in stocks:
+                if not isinstance(stock, dict):
+                    continue
+                action = str(stock.get("action", "") or stock.get("signal_action", "") or "").lower()
+                score = stock.get("sentiment_score") or stock.get("score")
+                if action in ("buy", "add", "strong_buy"):
+                    buy_count += 1
+                elif action in ("sell", "reduce", "strong_sell"):
+                    sell_count += 1
+                else:
+                    hold_count += 1
+            if buy_count or sell_count or hold_count:
+                meta["buy_count"] = buy_count
+                meta["sell_count"] = sell_count
+                meta["hold_count"] = hold_count
+        market_review = structured_payload.get("market_review") or structured_payload.get("market_status")
+        if market_review:
+            meta["report_type"] = "market_review"
+        return meta if meta else None
+
     def _send_to_static_channel(
         self,
         channel: NotificationChannel,
@@ -2584,6 +2623,7 @@ class NotificationService(
         email_stock_codes: Optional[List[str]],
         email_send_to_all: bool,
         route_type: Optional[str] = None,
+        structured_payload: Optional[Dict[str, Any]] = None,
     ) -> bool:
         use_image = self._should_use_image_for_channel(channel, image_bytes)
         sanitized_content = strip_hidden_markdown_metadata(content).strip()
@@ -2598,7 +2638,8 @@ class NotificationService(
                     sanitized_content, filename=f"report_{date_str}.md"
                 )
                 return self.send_feishu_file(filepath)
-            return self.send_to_feishu(sanitized_content)
+            card_meta = self._build_feishu_card_meta(structured_payload)
+            return self.send_to_feishu(sanitized_content, card_meta=card_meta)
         if channel == NotificationChannel.DINGTALK:
             return self.send_to_dingtalk(sanitized_content)
         if channel == NotificationChannel.TELEGRAM:
@@ -2808,6 +2849,7 @@ class NotificationService(
                     email_stock_codes=email_stock_codes,
                     email_send_to_all=email_send_to_all,
                     route_type=route_type,
+                    structured_payload=structured_payload,
                 )
                 latency_ms = int((time.monotonic() - started_at) * 1000)
 

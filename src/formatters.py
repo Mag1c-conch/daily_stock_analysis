@@ -813,14 +813,20 @@ def format_feishu_markdown(content: str) -> str:
 
         header = rows[0]
         data_rows = rows[1:] if len(rows) > 1 else []
+        wide_table = len(header) > 4
         for row in data_rows:
             if len(row) < len(header):
                 row = row + [""] * (len(header) - len(row))
-            pairs = []
-            for idx, cell in enumerate(row):
-                key = header[idx] if idx < len(header) else f"列{idx + 1}"
-                pairs.append(f"{key}：{cell}")
-            output.append(f"• {' | '.join(pairs)}")
+            if wide_table:
+                for idx, cell in enumerate(row):
+                    key = header[idx] if idx < len(header) else f"列{idx + 1}"
+                    output.append(f"  **{key}**：{cell}")
+            else:
+                pairs = []
+                for idx, cell in enumerate(row):
+                    key = header[idx] if idx < len(header) else f"列{idx + 1}"
+                    pairs.append(f"{key}：{cell}")
+                output.append(f"• {' | '.join(pairs)}")
 
     lines = []
     table_buffer: List[str] = []

@@ -134,20 +134,119 @@ class FeishuSender:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_card_body(content: str) -> dict:
-        """Build a Feishu interactive-card body (without the ``msg_type`` wrapper)."""
-        return {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": "股票智能分析报告"},
-            },
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {"tag": "lark_md", "content": content},
-                }
-            ],
+    def _signal_to_template(buy_count: int, sell_count: int, report_type: Optional[str] = None) -> str:
+        """Map signal distribution to Feishu header template color."""
+        if report_type == "market_review":
+            return "turquoise"
+        if sell_count > buy_count:
+            return "red"
+        if buy_count > sell_count:
+            return "green"
+        return "yellow"
+
+    @staticmethod
+    def _build_dynamic_header(
+        report_date: Optional[str] = None,
+        buy_count: int = 0,
+        sell_count: int = 0,
+        hold_count: int = 0,
+        report_type: Optional[str] = None,
+    ) -> dict:
+        """Build header with dynamic title and color template."""
+        if report_type == "market_review":
+            title = f"📊 {report_date or ''} 大盘复盘"
+            template = "turquoise"
+        elif sell_count > buy_count:
+            title = f"🔴 {report_date or ''} 偏空 ({buy_count}买/{sell_count}卖)"
+            template = "red"
+        elif buy_count > sell_count:
+            title = f"🟢 {report_date or ''} 偏多 ({buy_count}买/{sell_count}卖)"
+            template = "green"
+        else:
+            total = buy_count + sell_count + hold_count
+            if total == 0:
+                title = f"🎯 {report_date or ''} 智能分析"
+                template = "blue"
+            else:
+                title = f"🟡 {report_date or ''} 震荡 ({buy_count}买/{sell_count}卖)"
+                template = "yellow"
+        header = {
+            "title": {"tag": "plain_text", "content": title},
+            "template": template,
         }
+        return header
+
+    @staticmethod
+    def _build_card_body(
+        content: str,
+        *,
+        report_date: Optional[str] = None,
+        buy_count: int = 0,
+        sell_count: int = 0,
+        hold_count: int = 0,
+        report_type: Optional[str] = None,
+        report_timestamp: Optional[str] = None,
+        page_index: Optional[int] = None,
+        page_total: Optional[int] = None,
+    ) -> dict:
+        """Build a Feishu interactive-card body with structured multi-element layout.
+
+        When buy_count/sell_count/hold_count are all zero and report_type is
+        not set (legacy callers), falls back to the original static header.
+        """
+        has_signal_meta = buy_count or sell_count or hold_count or report_type
+        if has_signal_meta:
+            header = FeishuSender._build_dynamic_header(
+                report_date=report_date,
+                buy_count=buy_count,
+                sell_count=sell_count,
+                hold_count=hold_count,
+                report_type=report_type,
+            )
+        else:
+            header = {
+                "title": {"tag": "plain_text", "content": "股票智能分析报告"},
+            }
+
+        elements: list = []
+
+        content_parts = content.split("────────")
+        if len(content_parts) > 1:
+            for idx, part in enumerate(content_parts):
+                part = part.strip()
+                if not part:
+                    continue
+                elements.append({
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": part},
+                })
+                if idx < len(content_parts) - 1:
+                    elements.append({"tag": "hr"})
+        else:
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": content},
+            })
+
+        note_parts = []
+        if report_timestamp:
+            note_parts.append(report_timestamp)
+        if page_index is not None and page_total is not None and page_total > 1:
+            note_parts.append(f"第 {page_index + 1}/{page_total} 页")
+        if note_parts:
+            disclaimer = "AI 生成，不构成投资建议"
+            note_text = f"{disclaimer} · {' · '.join(note_parts)}"
+            elements.append({
+                "tag": "note",
+                "elements": [{"tag": "plain_text", "content": note_text}],
+            })
+
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": header,
+            "elements": elements,
+        }
+        return card
 
     # ------------------------------------------------------------------
     # Webhook helpers (unchanged legacy path)
@@ -218,11 +317,29 @@ class FeishuSender:
                 self._app_client = None
             return self._app_client
 
+    @staticmethod
+    def _extract_card_kwargs(
+        card_meta: Dict[str, Any],
+        *,
+        page_index: Optional[int] = None,
+        page_total: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Extract keyword arguments for ``_build_card_body`` from card_meta dict."""
+        kwargs: Dict[str, Any] = {}
+        for key in ("report_date", "buy_count", "sell_count", "hold_count", "report_type", "report_timestamp"):
+            if key in card_meta:
+                kwargs[key] = card_meta[key]
+        if page_index is not None:
+            kwargs["page_index"] = page_index
+        if page_total is not None:
+            kwargs["page_total"] = page_total
+        return kwargs
+
     # ------------------------------------------------------------------
     # App Bot send helpers
     # ------------------------------------------------------------------
 
-    def _send_via_app_bot(self, content: str) -> bool:
+    def _send_via_app_bot(self, content: str, *, card_meta: Optional[Dict[str, Any]] = None) -> bool:
         """Send message through the Feishu App Bot, chunking if necessary."""
         if not self._feishu_chat_id:
             logger.warning("FEISHU_CHAT_ID 未配置，跳过 App Bot 推送")
@@ -239,11 +356,11 @@ class FeishuSender:
             logger.info(
                 "App Bot 消息超长 (%d 字节)，将分批发送", content_bytes
             )
-            return self._app_send_chunked(client, formatted)
+            return self._app_send_chunked(client, formatted, card_meta=card_meta)
 
-        return self._app_send_once(client, formatted)
+        return self._app_send_once(client, formatted, card_meta=card_meta)
 
-    def _app_send_chunked(self, client: Any, content: str) -> bool:
+    def _app_send_chunked(self, client: Any, content: str, *, card_meta: Optional[Dict[str, Any]] = None) -> bool:
         """Chunk and send long content through App Bot."""
         try:
             chunks = chunk_content_by_max_bytes(
@@ -254,23 +371,35 @@ class FeishuSender:
             return False
 
         success = True
+        total_chunks = len(chunks)
         for i, chunk in enumerate(chunks):
-            ok = self._app_send_once(client, chunk)
+            ok = self._app_send_once(
+                client, chunk, card_meta=card_meta, page_index=i, page_total=total_chunks,
+            )
             if not ok:
-                logger.error("App Bot 第 %d/%d 批发送失败", i + 1, len(chunks))
+                logger.error("App Bot 第 %d/%d 批发送失败", i + 1, total_chunks)
                 success = False
-            if i < len(chunks) - 1:
+            if i < total_chunks - 1:
                 time.sleep(1)
         return success
 
-    def _app_send_once(self, client: Any, content: str) -> bool:
+    def _app_send_once(
+        self,
+        client: Any,
+        content: str,
+        *,
+        card_meta: Optional[Dict[str, Any]] = None,
+        page_index: Optional[int] = None,
+        page_total: Optional[int] = None,
+    ) -> bool:
         """Single-shot send via App Bot with card-first / text-fallback.
 
         Content received here has already been through ``format_feishu_markdown``
         which converts all Markdown constructs to ``lark_md``-compatible format.
         The interactive card uses ``tag: lark_md`` for rendering.
         """
-        card_payload = json.dumps(self._build_card_body(content), ensure_ascii=False)
+        card_kwargs = self._extract_card_kwargs(card_meta or {}, page_index=page_index, page_total=page_total)
+        card_payload = json.dumps(self._build_card_body(content, **card_kwargs), ensure_ascii=False)
 
         if self._app_send_raw(client, "interactive", card_payload):
             return True
@@ -358,7 +487,13 @@ class FeishuSender:
     # Public API
     # ------------------------------------------------------------------
 
-    def send_to_feishu(self, content: str, *, timeout_seconds: Optional[float] = None) -> bool:
+    def send_to_feishu(
+        self,
+        content: str,
+        *,
+        timeout_seconds: Optional[float] = None,
+        card_meta: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """
         Push a message to Feishu.
 
@@ -367,16 +502,23 @@ class FeishuSender:
           2. **App Bot** – when ``feishu_app_id`` + ``feishu_app_secret``
              + ``feishu_chat_id`` are all configured and webhook is absent.
 
-        Returns:
-            Whether the send succeeded.
+        Args:
+            card_meta: Optional dict with keys ``report_date``, ``buy_count``,
+                ``sell_count``, ``hold_count``, ``report_type``,
+                ``report_timestamp`` for building a rich card header.
         """
         if content is None:
             logger.error("send_to_feishu: content 不能为 None")
             return False
         sanitized_content = strip_hidden_markdown_metadata(content).strip()
+        meta = card_meta or {}
         if self._feishu_url:
-            return self._send_via_webhook(sanitized_content, timeout_seconds=timeout_seconds)
-        return self._send_via_app_bot(sanitized_content)
+            return self._send_via_webhook(
+                sanitized_content,
+                timeout_seconds=timeout_seconds,
+                card_meta=meta,
+            )
+        return self._send_via_app_bot(sanitized_content, card_meta=meta)
 
     def send_feishu_file(self, file_path: str) -> bool:
         """
@@ -536,7 +678,7 @@ class FeishuSender:
     # Webhook path (legacy, unchanged)
     # ------------------------------------------------------------------
 
-    def _send_via_webhook(self, content: str, *, timeout_seconds: Optional[float] = None) -> bool:
+    def _send_via_webhook(self, content: str, *, timeout_seconds: Optional[float] = None, card_meta: Optional[Dict[str, Any]] = None) -> bool:
         """Legacy webhook send path."""
         formatted_content = format_feishu_markdown(content)
 
@@ -559,15 +701,15 @@ class FeishuSender:
                 )
                 return False
             logger.info("飞书消息内容超长(%d字节/%d字符)，将分批发送", content_bytes, len(content))
-            return self._send_feishu_chunked(formatted_content, effective_max_bytes)
+            return self._send_feishu_chunked(formatted_content, effective_max_bytes, card_meta=card_meta)
 
         try:
-            return self._send_feishu_message(formatted_content, timeout_seconds=timeout_seconds)
+            return self._send_feishu_message(formatted_content, timeout_seconds=timeout_seconds, card_meta=card_meta)
         except Exception as e:
             logger.error("发送飞书消息失败: %s", e)
             return False
 
-    def _send_feishu_chunked(self, content: str, max_bytes: int) -> bool:
+    def _send_feishu_chunked(self, content: str, max_bytes: int, *, card_meta: Optional[Dict[str, Any]] = None) -> bool:
         try:
             chunks = chunk_content_by_max_bytes(content, max_bytes, add_page_marker=True)
         except ValueError as e:
@@ -579,7 +721,12 @@ class FeishuSender:
         logger.info("飞书分批发送：共 %d 批", total_chunks)
         for i, chunk in enumerate(chunks):
             try:
-                if self._send_feishu_message(chunk):
+                if self._send_feishu_message(
+                    chunk,
+                    card_meta=card_meta,
+                    page_index=i,
+                    page_total=total_chunks,
+                ):
                     success_count += 1
                     logger.info("飞书第 %d/%d 批发送成功", i + 1, total_chunks)
                 else:
@@ -590,7 +737,15 @@ class FeishuSender:
                 time.sleep(1)
         return success_count == total_chunks
 
-    def _send_feishu_message(self, content: str, *, timeout_seconds: Optional[float] = None) -> bool:
+    def _send_feishu_message(
+        self,
+        content: str,
+        *,
+        timeout_seconds: Optional[float] = None,
+        card_meta: Optional[Dict[str, Any]] = None,
+        page_index: Optional[int] = None,
+        page_total: Optional[int] = None,
+    ) -> bool:
         """Send a single Feishu webhook message (interactive card, fallback text)."""
         prepared_content = self._apply_keyword_prefix(content)
         security_fields = self._build_security_fields()
@@ -632,7 +787,8 @@ class FeishuSender:
             logger.error("飞书 Webhook 请求失败: HTTP %d", response.status_code)
             return False
 
-        card_payload = {"msg_type": "interactive", "card": self._build_card_body(prepared_content)}
+        card_kwargs = self._extract_card_kwargs(card_meta or {}, page_index=page_index, page_total=page_total)
+        card_payload = {"msg_type": "interactive", "card": self._build_card_body(prepared_content, **card_kwargs)}
 
         if _post_payload(card_payload):
             return True
