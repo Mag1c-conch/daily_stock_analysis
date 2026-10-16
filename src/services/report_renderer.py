@@ -111,6 +111,10 @@ def render(
         Rendered string, or None on error (caller should fallback).
     """
     from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        ZoneInfo = None
 
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -118,8 +122,26 @@ def render(
         logger.warning("jinja2 not installed, report renderer disabled")
         return None
 
+    def _now_shanghai() -> datetime:
+        tz_name = "Asia/Shanghai"
+        try:
+            cfg = get_config()
+            configured = getattr(cfg, "notification_timezone", "") or ""
+            if configured.strip():
+                tz_name = configured.strip()
+        except Exception:
+            pass
+        if ZoneInfo is not None:
+            try:
+                return datetime.now(ZoneInfo(tz_name))
+            except Exception:
+                pass
+        return datetime.now()
+
+    shanghai_now = _now_shanghai()
+
     if report_date is None:
-        report_date = datetime.now().strftime("%Y-%m-%d")
+        report_date = shanghai_now.strftime("%Y-%m-%d")
 
     templates_dir = _resolve_templates_dir()
     template_name = f"report_{platform}.j2"
@@ -188,7 +210,7 @@ def render(
                 models_used.append(model)
         models_used = list(dict.fromkeys(models_used))
 
-    report_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    report_timestamp = shanghai_now.strftime("%Y-%m-%d %H:%M:%S")
 
     def failed_checks(checklist: List[str]) -> List[str]:
         return [c for c in (checklist or []) if c.startswith("❌") or c.startswith("⚠️")]

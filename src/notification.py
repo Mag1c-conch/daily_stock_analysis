@@ -2576,6 +2576,29 @@ class NotificationService(
         return sanitize_diagnostic_text(text)
 
     @staticmethod
+    def _get_report_timestamp() -> str:
+        """Return current timestamp in Shanghai timezone (or configured notification_timezone)."""
+        from datetime import datetime
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            ZoneInfo = None
+        tz_name = "Asia/Shanghai"
+        try:
+            cfg = get_config()
+            configured = getattr(cfg, "notification_timezone", "") or ""
+            if configured.strip():
+                tz_name = configured.strip()
+        except Exception:
+            pass
+        if ZoneInfo is not None:
+            try:
+                return datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+        return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    @staticmethod
     def _build_feishu_card_meta(structured_payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Extract Feishu card metadata from structured_payload for rich card rendering.
 
@@ -2592,8 +2615,7 @@ class NotificationService(
         report_type = structured_payload.get("report_type")
         if report_type:
             meta["report_type"] = str(report_type)
-        from datetime import datetime as _dt
-        meta["report_timestamp"] = _dt.now().strftime("%Y-%m-%d %H:%M")
+        meta["report_timestamp"] = NotificationManager._get_report_timestamp()
         stocks = structured_payload.get("stocks") or structured_payload.get("results") or []
         if isinstance(stocks, list) and stocks:
             buy_count = 0
@@ -2639,9 +2661,8 @@ class NotificationService(
         """
         if not results:
             return None
-        from datetime import datetime as _dt
         meta: Dict[str, Any] = {
-            "report_timestamp": _dt.now().strftime("%Y-%m-%d %H:%M"),
+            "report_timestamp": NotificationManager._get_report_timestamp(),
         }
         buy_count = 0
         sell_count = 0
